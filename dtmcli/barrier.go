@@ -56,17 +56,6 @@ func insertBarrier(tx DB, transType string, gid string, branchID string, op stri
 	return dtmimp.DBExec(tx, sql, transType, gid, branchID, op, barrierID, reason)
 }
 
-//func findBarrier(tx DB, transType string, gid string, branchID string, op string) (int64, error) {
-//	if op == "" {
-//		return 0, nil
-//	}
-//	sql := dtmimp.GetDBSpecial().GetInsertIgnoreTemplate("dtm_barrier.barrier(trans_type, gid, branch_id, op, barrier_id, reason) values(?,?,?,?,?,?)", "uniq_barrier")
-//	return dtmimp.DBExec(tx, sql, transType, gid, branchID, op, barrierID, reason)
-//}
-
-// Call Sub-transaction barrier,see for details: https://zhuanlan.zhihu.com/p/388444465
-// tx: Transaction objects of the local database, allowing sub-transaction barriers to perform transaction operations
-// busiCall: business func,called only when necessary
 func (bb *BranchBarrier) Call(tx *sql.Tx, busiCall BarrierBusiFunc) (rerr error) {
 	bb.BarrierID = bb.BarrierID + 1
 	defer func() {
