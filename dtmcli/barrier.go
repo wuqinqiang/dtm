@@ -9,9 +9,8 @@ package dtmcli
 import (
 	"database/sql"
 	"fmt"
-	"net/url"
-
 	"github.com/yedf/dtm/dtmcli/dtmimp"
+	"net/url"
 )
 
 // BarrierBusiFunc type for busi func
@@ -57,14 +56,12 @@ func insertBarrier(tx DB, transType string, gid string, branchID string, op stri
 	return dtmimp.DBExec(tx, sql, transType, gid, branchID, op, barrierID, reason)
 }
 
-// Call 子事务屏障，详细介绍见 https://zhuanlan.zhihu.com/p/388444465
-// tx: 本地数据库的事务对象，允许子事务屏障进行事务操作
-// busiCall: 业务函数，仅在必要时被调用
+// Call Sub-transaction barrier,see for details: https://zhuanlan.zhihu.com/p/388444465
+// tx: Transaction objects of the local database, allowing sub-transaction barriers to perform transaction operations
+// busiCall: business func,called only when necessary
 func (bb *BranchBarrier) Call(tx *sql.Tx, busiCall BarrierBusiFunc) (rerr error) {
 	bb.BarrierID = bb.BarrierID + 1
-	bid := fmt.Sprintf("%02d", bb.BarrierID)
 	defer func() {
-		// Logf("barrier call error is %v", rerr)
 		if x := recover(); x != nil {
 			tx.Rollback()
 			panic(x)
@@ -74,21 +71,80 @@ func (bb *BranchBarrier) Call(tx *sql.Tx, busiCall BarrierBusiFunc) (rerr error)
 			tx.Commit()
 		}
 	}()
-	ti := bb
-	originType := map[string]string{
-		BranchCancel:     BranchTry,
-		BranchCompensate: BranchAction,
-	}[ti.Op]
 
-	originAffected, _ := insertBarrier(tx, ti.TransType, ti.Gid, ti.BranchID, originType, bid, ti.Op)
-	currentAffected, rerr := insertBarrier(tx, ti.TransType, ti.Gid, ti.BranchID, ti.Op, bid, ti.Op)
-	dtmimp.Logf("originAffected: %d currentAffected: %d", originAffected, currentAffected)
-	if (ti.Op == BranchCancel || ti.Op == BranchCompensate) && originAffected > 0 || // 这个是空补偿
-		currentAffected == 0 { // 这个是重复请求或者悬挂
+	// check this request
+	if !bb.checkRepeatOp(tx) || !bb.checkEmptyRollBackOp(tx) || !bb.checkSuspensionOp(tx) {
 		return
 	}
 	rerr = busiCall(tx)
 	return
+}
+
+// Guaranteed same request idempotence
+func (bb *BranchBarrier) checkRepeatOp(tx *sql.Tx) bool {
+	bid := fmt.Sprintf("%02d", bb.BarrierID)
+	currentAffected, _ := insertBarrier(tx, bb.TransType,
+		bb.Gid, bb.BranchID, bb.Op, bid, bb.Op)
+	if currentAffected == 0 {
+		return false
+	}
+	return true
+}
+
+// Without calling TCC | saga try method,the second-stage Cancel method was
+// called.the Cancel method needs to recognize that this is an empty rollback,
+//and then directly return success
+func (bb *BranchBarrier) checkEmptyRollBackOp(tx *sql.Tx) bool {
+	if bb.Op != BranchCancel && bb.Op != BranchCompensate {
+		return true
+	}
+
+	bid := fmt.Sprintf("%02d", bb.BarrierID)
+
+	var (
+		originType string
+	)
+	if bb.Op == BranchCancel {
+		originType = BranchTry
+	} else if bb.Op == BranchCompensate {
+		originType = BranchAction
+	}
+
+	//when originAffected > 0,
+	//it means that the first stage action has not been executed yet.
+	// this request is a empty rollback op.
+	if originAffected, _ := insertBarrier(tx, bb.TransType,
+		bb.Gid, bb.BranchID, originType, bid, bb.Op); originAffected > 0 {
+		return false
+	}
+	return true
+}
+
+// Under abnormal circumstances,the second-stage Cancel method is executed before the try method.
+// The try method needs to recognize that this is a suspension.
+// Then don't handle try request when empty rollback has been executed
+func (bb *BranchBarrier) checkSuspensionOp(tx *sql.Tx) bool {
+	if bb.Op != BranchTry {
+		return true
+	}
+	bid := fmt.Sprintf("%02d", bb.BarrierID)
+
+	var (
+		originType string
+	)
+	if bb.TransType == "tcc" {
+		originType = BranchCancel
+	} else if bb.TransType == "saga" {
+		originType = BranchCompensate
+	}
+
+	// when originAffected==0
+	// it means that the second stage (cancel | compensate) action has been executed befor try.
+	if originAffected, _ := insertBarrier(tx, bb.TransType,
+		bb.Gid, bb.BranchID, originType, bid, bb.Op); originAffected == 0 {
+		return false
+	}
+	return true
 }
 
 // CallWithDB the same as Call, but with *sql.DB
