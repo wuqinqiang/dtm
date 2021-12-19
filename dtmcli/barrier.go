@@ -83,6 +83,7 @@ func (bb *BranchBarrier) Call(tx *sql.Tx, busiCall BarrierBusiFunc) (rerr error)
 	if !bb.checkRepeatOp(tx) || !bb.checkEmptyRollBackOp(tx) {
 		return
 	}
+
 	rerr = busiCall(tx)
 	return
 }
